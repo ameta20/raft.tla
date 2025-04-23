@@ -12,17 +12,20 @@ EXTENDS Naturals, FiniteSets, Sequences, TLC
 CONSTANTS Server
 
 \* The set of requests that can go into the log
-CONSTANTS Value
+CONSTANTS Value, RequestId 
 
 \* Server states.
 CONSTANTS Follower, Candidate, Leader
+
+\* To identify the switch
+CONSTANTS Switch
 
 \* A reserved value.
 CONSTANTS Nil
 
 \* Message types:
 CONSTANTS RequestVoteRequest, RequestVoteResponse,
-          AppendEntriesRequest, AppendEntriesResponse
+          AppendEntriesRequest, AppendEntriesResponse,CRequestViaSwitch
 
 CONSTANTS MaxClientRequests
 
@@ -58,6 +61,7 @@ VARIABLE leaderCount
 \* Maximum term number allowed in the model
 CONSTANTS MaxTerm
 
+VARIABLE pendingClientRequests
 
 ----
 \* The following variables are all per server (functions with domain Server).
@@ -181,6 +185,11 @@ InitLeaderVars == /\ nextIndex  = [i \in Server |-> [j \in Server |-> 1]]
                   /\ matchIndex = [i \in Server |-> [j \in Server |-> 0]]
 InitLogVars == /\ log          = [i \in Server |-> << >>]
                /\ commitIndex  = [i \in Server |-> 0]
+               
+               
+InitPendingRequests == /\ pendingClientRequests = [i \in Server |-> {}]
+
+
 Init == /\ messages = [m \in {} |-> 0]
         /\ InitHistoryVars
         /\ InitServerVars
@@ -189,6 +198,7 @@ Init == /\ messages = [m \in {} |-> 0]
         /\ InitLogVars
         /\ maxc = 0
         /\ leaderCount = [i \in Server |-> 0]
+        /\ InitPendingRequests
 
 ----
 \* Define state transitions
@@ -229,7 +239,22 @@ RequestVote(i, j) ==
              msource       |-> i,
              mdest         |-> j])
     /\ UNCHANGED <<serverVars, candidateVars, leaderVars, logVars, maxc, leaderCount>>
+    
 
+\* Requirement 1 
+SwitchSendingCRequest(val,reqId,i) ==
+    /\ i 
+    /\ maxc < MaxClientRequests
+    /\ Send([            mtype      |-> CRequestViaSwitch,
+                         mvalue     |-> val,     
+                         mrequestID |-> reqId,    
+                         msource    |-> Switch, 
+                         mdest      |-> i])
+    
+    /\ UNCHANGED  <<serverVars, candidateVars, leaderVars, logVars, leaderCount,
+                   maxc, pendingClientRequests>>
+
+\* Requirement 2
 \* Leader i sends j an AppendEntries request containing up to 1 entry.
 \* While implementations may want to send more than 1 at a time, this spec uses
 \* just 1 because it minimizes atomic regions without loss of generality.
@@ -251,7 +276,7 @@ AppendEntries(i, j) ==
                 mentries       |-> entries,
                 \* mlog is used as a history variable for the proof.
                 \* It would not exist in a real implementation.
-                mlog           |-> log[i],
+                \* mlog           |-> log[i], it wont send the payload
                 mcommitIndex   |-> Min({commitIndex[i], lastEntry}),
                 msource        |-> i,
                 mdest          |-> j])
@@ -289,24 +314,24 @@ BecomeLeader(i) ==
 ValidMessage(msgs) ==
     { m \in DOMAIN messages : msgs[m] > 0 }
     
-ClientRequest(i, v) ==
-    /\ state[i] = Leader
-    /\ maxc < MaxClientRequests 
-    /\ LET entry == [term  |-> currentTerm[i],
-                     value |-> v]
-           entryExists == 
+\* ClientRequest(i, v) ==
+\*     /\ state[i] = Leader
+\*     /\ maxc < MaxClientRequests 
+\*     /\ LET entry == [term  |-> currentTerm[i],
+ \*                     value |-> v]
+\*            entryExists == 
 \*           \E s \in Server : 
 \*                 \E j \in DOMAIN log[s] : 
 \*                     log[s][j].value = v
-           \E j \in DOMAIN log[i] : log[i][j].value = v /\ log[i][j].term = currentTerm[i]
-           newLog == IF entryExists 
-                     THEN log[i]  \* Keep log unchanged if entry exists
-                     ELSE Append(log[i], entry)  \* Otherwise append the new entry
-       IN  
-        /\ log' = [log EXCEPT ![i] = newLog]
-        /\ maxc' = IF entryExists THEN maxc ELSE maxc + 1
-    /\ UNCHANGED <<messages, serverVars, candidateVars,
-                   leaderVars, commitIndex, leaderCount>>
+ \*           \E j \in DOMAIN log[i] : log[i][j].value = v /\ log[i][j].term = currentTerm[i]
+ \*           newLog == IF entryExists 
+  \*                    THEN log[i]  \* Keep log unchanged if entry exists
+  \*                    ELSE Append(log[i], entry)  \* Otherwise append the new entry
+   \*     IN  
+  \*       /\ log' = [log EXCEPT ![i] = newLog]
+  \*       /\ maxc' = IF entryExists THEN maxc ELSE maxc + 1
+   \*  /\ UNCHANGED <<messages, serverVars, candidateVars,
+    \*                leaderVars, commitIndex, leaderCount>>
 
 \* Leader i advances its commitIndex.
 \* This is done as a separate step from handling AppendEntries responses,
@@ -335,6 +360,7 @@ AdvanceCommitIndex(i) ==
 \* Message handlers
 \* i = recipient, j = sender, m = message
 
+
 \* Server i receives a RequestVote request from server j with
 \* m.mterm <= currentTerm[i].
 HandleRequestVoteRequest(i, j, m) ==
@@ -357,6 +383,36 @@ HandleRequestVoteRequest(i, j, m) ==
                  mdest        |-> j],
                  m)
        /\ UNCHANGED <<state, currentTerm, candidateVars, leaderVars, logVars, maxc, leaderCount>>
+       
+ 
+\*       
+HandleClientRequestViaSwitch(i, m) ==
+    LET newRequestRecord == [requestID |-> m.mrequestID, value |-> m.mvalue]
+    IN
+    /\ pendingClientRequests' = [pendingClientRequests EXCEPT ![i] =
+                                    pendingClientRequests[i] \cup {newRequestRecord} ]
+
+ 
+    /\ IF state[i] = Leader THEN \* if receiver is leader, need to log message
+         LET v == m.mvalue
+             reqId == m.mrequestID
+             \* Check if this request ID is already *in the log* for the current term
+             entryExistsInLog == \E x \in DOMAIN log[i] :
+                                   log[i][x].requestID = reqId /\ log[i][x].term = currentTerm[i]
+             newLogEntry == [term      |-> currentTerm[i],
+                             value     |-> v,
+                             requestID |-> reqId]
+             newLog == IF entryExistsInLog
+                       THEN log[i]
+                       ELSE Append(log[i], newLogEntry)
+         IN /\ log' = [log EXCEPT ![i] = newLog]
+            /\ maxc' = IF entryExistsInLog THEN maxc ELSE maxc + 1
+            /\ UNCHANGED <<commitIndex>>
+    \* if receiver is FOLLOWER/CANDIDATE, just buffer.
+       ELSE
+          UNCHANGED <<logVars, maxc>>
+    /\ Discard(m)
+    /\ UNCHANGED <<messages, serverVars, candidateVars, leaderVars, leaderCount>>
 
 \* Server i receives a RequestVote response from server j with
 \* m.mterm = currentTerm[i].
@@ -515,7 +571,7 @@ Next == /\ \/ \E i \in Server : Timeout(i)
 \*           \/ \E i \in Server : Restart(i)
            \/ \E i,j \in Server : i /= j /\ RequestVote(i, j)
            \/ \E i \in Server : BecomeLeader(i)
-           \/ \E i \in Server, v \in Value : ClientRequest(i, v)
+           \/ \A i \in Server, v \in Value, reqId \in RequestId  : SwitchSendingCRequest(i,reqId, v)
            \/ \E i \in Server : AdvanceCommitIndex(i)
            \/ \E i,j \in Server : i /= j /\ AppendEntries(i, j)
            \/ \E m \in {msg \in ValidMessage(messages) : 
