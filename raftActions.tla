@@ -124,55 +124,40 @@ DropStaleResponse(i, j, m) ==
 
 \***************************** AppendEntries **********************************************
 
-
-\* Modified. Leader i sends j an AppendEntries request containing exactly 1 entry. It was up to 1 entry.
-\* While implementations may want to send more than 1 at a time, this spec uses
-\* just 1 because it minimizes atomic regions without loss of generality.
 AppendEntries(i, j) ==
-    /\ i /= j
     /\ state[i] = Leader
-    /\ Len(log[i]) > 0  \* Only proceed if the leader has entries to send
-    /\ nextIndex[i][j] <= Len(log[i])  \*  Only proceed if there are entries to send to this follower
-    /\ matchIndex[i][j] < nextIndex[i][j] \* Only send if follower hasn't already acknowledged this index
+    /\ Len(log[i]) > 0
+    /\ nextIndex[i][j] <= Len(log[i])
     /\ LET entryIndex == nextIndex[i][j]
-           entry == log[i][entryIndex]
-           entries == << entry >>
-           entryKey == <<entryIndex, entry.term>>
+           fullLogEntry == log[i][entryIndex]
+           metadataToSend == << [ term |-> fullLogEntry.term,
+                                  payload |-> fullLogEntry.payload ] >>
+           entryKeyForStats == <<entryIndex, fullLogEntry.term>>
            prevLogIndex == entryIndex - 1
-           prevLogTerm == IF prevLogIndex > 0 THEN
-                              log[i][prevLogIndex].term
-                          ELSE
-                              0
-           \* Send up to 1 entry, constrained by the end of the log.
-           \* lastEntry == Min({Len(log[i]), nextIndex[i][j]})
-           \* entries == SubSeq(log[i], nextIndex[i][j], lastEntry)
-           
-       IN Send([mtype          |-> AppendEntriesRequest,
-                mterm          |-> currentTerm[i],
-                mprevLogIndex  |-> prevLogIndex,
-                mprevLogTerm   |-> prevLogTerm,
-                mentries       |-> entries,
-                \* mlog is used as a history variable for the proof.
-                \* It would not exist in a real implementation.
-                mlog           |-> log[i],
-                mcommitIndex   |-> Min({commitIndex[i], entryIndex}), \* lastEntry}),
-                msource        |-> i,
-                mdest          |-> j])
-       /\ entryCommitStats' =   \* First ToDO
-            [ entryCommitStats EXCEPT
-                ![entryKey] = IF entryKey \in DOMAIN entryCommitStats
-                              /\ ~entryCommitStats[entryKey].committed
-                            THEN
-                              [ sentCount  |-> entryCommitStats[entryKey].sentCount + 1,
-                                ackCount   |-> entryCommitStats[entryKey].ackCount,
-                                committed  |-> entryCommitStats[entryKey].committed ]
-                            ELSE
-                               [ sentCount  |-> entryCommitStats[entryKey].sentCount,
-                                ackCount   |-> entryCommitStats[entryKey].ackCount,
-                                committed  |-> entryCommitStats[entryKey].committed ]
-            ]
-    
-    /\ UNCHANGED <<serverVars, candidateVars, leaderVars, logVars, maxc, leaderCount,hovercraftVars>>
+           prevLogTerm == IF prevLogIndex > 0 THEN log[i][prevLogIndex].term ELSE 0
+       IN 
+       /\ Send([mtype |-> AppendEntriesRequest,
+               mterm |-> currentTerm[i],
+               mprevLogIndex |-> prevLogIndex,
+               mprevLogTerm |-> prevLogTerm,
+               mentries |-> metadataToSend,
+               mcommitIndex |-> Min({commitIndex[i], entryIndex}),
+               msource |-> i,
+               mdest |-> j])
+       /\ entryCommitStats' = 
+           IF entryKeyForStats \in DOMAIN entryCommitStats THEN
+               [entryCommitStats EXCEPT ![entryKeyForStats] = 
+                   [sentCount |-> entryCommitStats[entryKeyForStats].sentCount + 1,
+                    ackCount |-> entryCommitStats[entryKeyForStats].ackCount,
+                    committed |-> entryCommitStats[entryKeyForStats].committed]]
+           ELSE
+               entryCommitStats @@ 
+                   [entryKeyForStats |-> [sentCount |-> 1, 
+                                         ackCount |-> 0, 
+                                         committed |-> FALSE]]
+    /\ UNCHANGED <<currentTerm, state, votedFor, log, commitIndex, 
+                  votesResponded, votesGranted, voterLog, leaderVars, 
+                  leaderCount, maxc, hovercraftVars>>
 
 
 \* Server i receives an AppendEntries request from server j with
@@ -393,8 +378,26 @@ SwitchClientRequestReplicate(sw_idx, target_server_id, v_key) ==
                    \* switchIndex is also UNCHANGED.
                    \* switchBuffer is only read, not modified by this action.
  
+ 
+\* Modified. Leader i receives a switch request to add v to the log. up to MaxClientRequests.
+LeaderAddLog(i, v) ==
+    /\ state[i] = Leader
+    /\ maxc < MaxClientRequests 
+    /\ LET entryTerm == currentTerm[i]
+           entry == [term |-> entryTerm, value |-> v,  payload |-> v]
+           entryExists == \E j \in DOMAIN log[i] : log[i][j].value = v /\ log[i][j].term = entryTerm
+           newLog == IF entryExists THEN log[i] ELSE Append(log[i], entry)
+           newEntryIndex == Len(log[i]) + 1
+           newEntryKey == <<newEntryIndex, entryTerm>>
+       IN
+        /\ log' = [log EXCEPT ![i] = newLog]
+        /\ maxc' = IF entryExists THEN maxc ELSE maxc + 1
+        /\ entryCommitStats' =
+              IF ~entryExists /\ newEntryIndex > 0 \* Only add stats for truly new entries
+              THEN entryCommitStats @@ (newEntryKey :> [ sentCount |-> 0, ackCount |-> 0, committed |-> FALSE ])
+              ELSE entryCommitStats
+    /\ UNCHANGED <<messages, serverVars, candidateVars, leaderVars, commitIndex, leaderCount,hovercraftVars>>
 
-\* LeaderIngestHovercRaftRequest(i, v) ==
 
 =============================================================================
 \* Created by Ovidiu-Cristian Marcu

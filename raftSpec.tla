@@ -39,6 +39,10 @@ MySwitchNext ==
    \/ \E i \in RaftServers(switchIndex), v \in DOMAIN switchBuffer : 
 
     SwitchClientRequestReplicate(switchIndex, i, v)
+    
+   \/ \E i \in Server, v \in DOMAIN switchBuffer : 
+
+      state[i] = Leader /\ LeaderAddLog(i, v)
 
    \/ \E i \in RaftServers(switchIndex) : AdvanceCommitIndex(i)
 
@@ -86,6 +90,9 @@ LogInv ==
         \/ CheckIsPrefix(Committed(i),Committed(j)) 
         \/ CheckIsPrefix(Committed(j),Committed(i))
 
+
+THEOREM MySpec => ([]LogInv /\ []LeaderCompletenessInv
+ /\ []LogMatchingInv /\ []MoreThanOneLeaderInv) 
 \* Note that LogInv checks for safety violations across space
 \* This is a key safety invariant and should always be checked
 
