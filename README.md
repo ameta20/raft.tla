@@ -12,3 +12,12 @@ DONE
         - removed the clientRequest and added the SwitchSendingCRequest
         - added a handler for the requests from switch
         - modified the appendEntries
+
+
+*Changes done during 24/04/25 - 11/05/25*
+1. Modified in the code:
+        - Modified my previous code to make switch as server
+        - defined myInit for hoverCraft model and mySwitchNext
+        - defined SwitchClientRequest(switchIndex, i, v)
+        - defined SwitchClientRequestReplicate(switchIndex, i, v)
+        - modified the code like actions to also use the new variables for switch
